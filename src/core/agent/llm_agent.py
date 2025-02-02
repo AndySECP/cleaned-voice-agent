@@ -6,35 +6,37 @@ import logging
 from datetime import datetime
 
 from src.core.agent.tools import AVAILABLE_TOOLS
+from src.core.agent.memory import MemoryManager #, Message
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = f"""You are an AI assistant specialized in analyzing hallucination detection experiments. 
-Your role is to help users understand and analyze experimental results from various model runs.
+SYSTEM_PROMPT = """You are an AI assistant specializing in analyzing an hallucination detection experiments. 
+Speak naturally as if we're having a friendly conversation. Your responses should be easy to listen to and understand. Response should be concise and just respond to the question.
 
-You have access to the following tools:
-1. get_best_models: Get top performing models ranked by a specific metric
-2. compare_hyperparams: Compare performance across different hyperparameter settings
-3. get_experiment_details: Get detailed information about specific experiments
+You have access to these tools:
+1. get_best_models: Find top models by metric
+2. compare_hyperparams: Compare different settings
+3. get_experiment_details: Get specific experiment info
 
-Available metrics for analysis:
-- accuracy (model's accuracy score)
-- f1 (F1 score balancing precision and recall)
-- precision (true positives / predicted positives)
-- recall (true positives / actual positives)
-- hallucination_rate (rate of hallucinated content)
-- train_loss (training loss)
-- eval_loss (evaluation loss)
+Guidelines for speaking:
+- Use conversational language like "The model uses..." or "It's configured with..."
+- Break information into digestible chunks
+- Pause naturally using commas and periods
+- Avoid listing technical details unless specifically asked, when you do, do it in a conversational way
+- When mentioning numbers, round them for easier speech
+- Offer to provide more specific details if needed
 
-Guidelines:
-- Always provide context and explain your findings
-- If data is missing, explain what you found and suggest alternatives
-- Use natural language to explain technical concepts
-- When comparing models, consider trade-offs between metrics
-- Provide specific examples and numbers to support your analysis
+Remember to:
+- Keep it concise and clear
+- Focus on the most relevant information
+- Use natural transitions between ideas
+- Speak as if you're explaining to a colleague
 
-The experiments primarily focus on SmolLM2 models trained for hallucination detection, with various 
-learning rates and warmup ratios."""
+Example response style:
+Instead of listing parameters, say something like:
+"This model uses a Llama architecture with 30 layers. The key settings are a learning rate of 0.0003 and a hidden size of 576. Would you like me to go into more detail about any specific aspects?"
+
+The experiments use SmolLM2 models trained for hallucination detection with various settings."""
 
 
 class HallucinationAnalysisAgent:
@@ -43,7 +45,8 @@ class HallucinationAnalysisAgent:
         openai_api_key: str,
         data_manager,
         query_optimizer,
-        tools
+        tools,
+        memory_manager: Optional[MemoryManager] = None
     ):
         self.client = AsyncOpenAI(api_key=openai_api_key)
         self.data_manager = data_manager
@@ -52,23 +55,27 @@ class HallucinationAnalysisAgent:
         self.available_functions = {
             "get_best_models": tools.get_best_models,
             "compare_hyperparams": tools.compare_hyperparams,
-            "get_experiment_details": tools.get_experiment_details
+            "get_experiment_details": tools.get_experiment_details,
+            "analyze_by_model_type": tools.analyze_by_model_type,
+            "analyze_config_impact": tools.analyze_config_impact,
+            "get_performance_distribution": tools.get_performance_distribution,
+            "compare_architectures": tools.compare_architectures,
         }
-        
-    async def process_query(self, query: str, context: Optional[Dict] = None) -> Dict[str, Any]:
-        """Process a user query using the LLM agent"""
-        try:
-            # Initialize conversation
-            messages = [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": query}
-            ]
+        self.memory = memory_manager or MemoryManager()
 
-            if context:
-                messages.append({
-                    "role": "assistant",
-                    "content": f"Previous context: {json.dumps(context)}"
-                })
+    async def process_query(self, query: str, context: Optional[Dict] = None) -> Dict[str, Any]:
+        """Process a user query using the LLM agent with simplified conversation handling"""
+        try:
+            # Get conversation history
+            conversation_history = self.memory.get_recent_context()
+            
+            # Initialize messages array
+            messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            messages.extend(conversation_history)
+            messages.append({"role": "user", "content": query})
+
+            # Store user query
+            await self.memory.add_message("user", query)
 
             # Get initial response
             response = await self.client.chat.completions.create(
@@ -80,10 +87,10 @@ class HallucinationAnalysisAgent:
             )
 
             message = response.choices[0].message
-            messages.append(message)  # Add assistant's message to conversation
 
-            # If no tool calls, return direct response
+            # If no tool calls, store and return direct response
             if not message.tool_calls:
+                await self.memory.add_message("assistant", message.content)
                 return {
                     "response": message.content,
                     "metadata": {
@@ -92,34 +99,49 @@ class HallucinationAnalysisAgent:
                     }
                 }
 
-            # Execute tool calls and add results to conversation
+            # Handle tool calls
             tools_used = []
+            tool_results = []
+
+            # Process each tool call
             for tool_call in message.tool_calls:
                 tool_name = tool_call.function.name
                 tool_args = json.loads(tool_call.function.arguments)
                 
                 if tool_name in self.available_functions:
-                    # Execute the tool
-                    result = await self.available_functions[tool_name](**tool_args)
-                    tools_used.append(tool_name)
-                    
-                    # Add tool result to conversation
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": tool_name,
-                        "content": json.dumps(result)
-                    })
+                    try:
+                        result = await self.available_functions[tool_name](**tool_args)
+                        tool_results.append(result)
+                        tools_used.append(tool_name)
+                    except Exception as e:
+                        logger.error(f"Error executing tool {tool_name}: {e}")
+                        tool_results.append({"error": str(e)})
 
-            # Get final response with tool results
+            # Get final response using tool results
+            final_messages = messages.copy()
+            if tool_results:
+                final_messages.append({
+                    "role": "assistant",
+                    "content": "I've gathered the requested information."
+                })
+                final_messages.append({
+                    "role": "user",
+                    "content": f"Here are the results: {json.dumps(tool_results)}"
+                })
+
             final_response = await self.client.chat.completions.create(
                 model="gpt-4-turbo-preview",
-                messages=messages,
+                messages=final_messages,
                 temperature=0.1
             )
 
+            final_message = final_response.choices[0].message.content
+            
+            # Store final response
+            await self.memory.add_message("assistant", final_message)
+
             return {
-                "response": final_response.choices[0].message.content,
+                "response": final_message,
                 "metadata": {
                     "tools_used": tools_used,
                     "timestamp": datetime.now().isoformat()
@@ -127,17 +149,121 @@ class HallucinationAnalysisAgent:
             }
 
         except Exception as e:
-            logger.error(f"Error processing query: {str(e)}")
-            return {
-                "response": "I encountered an error while processing your request. Please try rephrasing your question.",
-                "error": str(e),
-                "metadata": {
-                    "timestamp": datetime.now().isoformat()
+            logger.error(f"Error processing query: {str(e)}", exc_info=True)
+            raise
+
+    async def _get_filtered_context(self) -> List[Dict[str, Any]]:
+        """Get conversation history ensuring proper tool call handling"""
+        try:
+            # Get recent messages from memory
+            messages = self.memory.get_recent_context()
+            
+            # Filter and transform messages for the conversation
+            filtered_messages = []
+            
+            for msg in messages:
+                if msg["role"] not in {"system", "user", "assistant", "tool"}:
+                    continue
+                    
+                message = {
+                    "role": msg["role"],
+                    "content": msg["content"]
                 }
-            }
+                
+                # Handle tool calls in assistant messages
+                if msg["role"] == "assistant" and "tool_calls" in msg:
+                    message["tool_calls"] = msg["tool_calls"]
+                
+                # Handle tool response messages
+                if msg["role"] == "tool":
+                    if "tool_call_id" not in msg or "name" not in msg:
+                        continue
+                    message["tool_call_id"] = msg["tool_call_id"]
+                    message["name"] = msg["name"]
+                
+                filtered_messages.append(message)
+            
+            return filtered_messages
+        except Exception as e:
+            logger.error(f"Error getting filtered context: {e}")
+            return []
+
+    async def _create_assistant_message(self, message) -> Dict[str, Any]:
+        """Create and store assistant message with tool calls"""
+        assistant_message = {
+            "role": "assistant",
+            "content": message.content or None
+        }
+        
+        if message.tool_calls:
+            assistant_message["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": tc.type,
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments
+                    }
+                } for tc in message.tool_calls
+            ]
+        
+        # Store assistant's tool request as essential
+        await self.memory.add_message(Message(
+            role="assistant",
+            content=message.content or "",
+            timestamp=datetime.now().isoformat(),
+            metadata={},
+            tool_calls=assistant_message.get("tool_calls", []),
+            essential=True  # Mark tool requests as essential
+        ))
+        
+        return assistant_message
+
+    async def _process_tool_calls(
+        self,
+        tool_calls: List[Any],
+        messages: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Process tool calls and manage their memory storage"""
+        tools_used = []
+        tool_messages = []
+        
+        for tool_call in tool_calls:
+            tool_name = tool_call.function.name
+            tool_args = json.loads(tool_call.function.arguments)
+            
+            if tool_name in self.available_functions:
+                # Execute tool
+                result = await self.available_functions[tool_name](**tool_args)
+                tools_used.append(tool_name)
+                
+                # Create tool message
+                tool_message = {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": tool_name,
+                    "content": json.dumps(result)
+                }
+                tool_messages.append(tool_message)
+                
+                # Store tool result as non-essential
+                await self.memory.add_message(Message(
+                    role="tool",
+                    content=json.dumps(result),
+                    timestamp=datetime.now().isoformat(),
+                    metadata={"tool_name": tool_name},
+                    tool_call_id=tool_call.id,
+                    name=tool_name,
+                    essential=False  # Mark tool responses as non-essential
+                ))
+        
+        return {
+            "messages": tool_messages,
+            "tools_used": tools_used
+        }
 
     async def _handle_response(self, response: Any, original_query: str) -> Dict[str, Any]:
-        """Handle LLM response and execute any tool calls"""
+        """Handle LLM response and execute tool calls with memory management"""
         try:
             message = response.choices[0].message
             
@@ -155,23 +281,8 @@ class HallucinationAnalysisAgent:
             results = []
             
             for tool_call in message.tool_calls:
-                tool_name = tool_call.function.name
-                tool_args = json.loads(tool_call.function.arguments)
-                
-                # Execute the appropriate tool
-                if tool_name == "analyze_metric":
-                    result = await self._analyze_metric(tool_args["metric_name"])
-                elif tool_name == "compare_experiments":
-                    result = await self._compare_experiments(
-                        tool_args["experiment_ids"],
-                        tool_args.get("metrics", ["accuracy", "hallucination_rate"])
-                    )
-                elif tool_name == "get_experiment_details":
-                    result = await self._get_experiment_details(tool_args["experiment_id"])
-                else:
-                    result = {"error": f"Unknown tool: {tool_name}"}
-
-                tools_used.append(tool_name)
+                result = await self._execute_tool(tool_call)
+                tools_used.append(tool_call.function.name)
                 results.append(result)
 
             # Get final response incorporating tool results
@@ -201,6 +312,23 @@ class HallucinationAnalysisAgent:
                 "error": str(e),
                 "timestamp": datetime.now().isoformat()
             }
+
+    async def _execute_tool(self, tool_call: Any) -> Dict[str, Any]:
+        """Execute a tool call and return its result"""
+        tool_name = tool_call.function.name
+        tool_args = json.loads(tool_call.function.arguments)
+        
+        # Check if tool exists in available functions
+        if tool_name in self.available_functions:
+            try:
+                result = await self.available_functions[tool_name](**tool_args)
+                return result
+            except Exception as e:
+                logger.error(f"Error executing tool {tool_name}: {str(e)}")
+                return {"error": f"Tool execution failed: {str(e)}"}
+        else:
+            logger.warning(f"Unknown tool requested: {tool_name}")
+            return {"error": f"Unknown tool: {tool_name}"}
 
     async def _analyze_metric(self, metric_name: str) -> Dict[str, Any]:
         """Analyze a specific metric across experiments"""

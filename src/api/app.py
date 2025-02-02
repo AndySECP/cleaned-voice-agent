@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from src.api.routes import router
 from src.services.data.data_manager import HallucinationDataManager
+from src.core.agent.memory import MemoryManager
 from src.services.query_service import WeaveQueryService
 from functools import lru_cache
 from src.core.config import Settings
@@ -99,17 +100,25 @@ async def general_exception_handler(request, exc: Exception):
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize data and cache at startup"""
+    """Initialize data and memory at startup"""
     try:
         # Initialize data manager
         data_manager = HallucinationDataManager()
         await data_manager.initialize()
         
+        # Initialize memory manager (no async needed here)
+        memory_manager = MemoryManager(
+            cache_size=20,  # Keep 20 most recent messages in memory
+            persist_after=5  # Write to database every 5 messages
+        )
+        
         # Store in app state for access across requests
         app.state.data_manager = data_manager
-        logger.info("Successfully initialized data manager at startup")
+        app.state.memory_manager = memory_manager
+        
+        logger.info("Successfully initialized data manager and memory at startup")
     except Exception as e:
-        logger.error(f"Failed to initialize data manager: {e}")
+        logger.error(f"Failed to initialize services: {e}")
         raise
 
 if __name__ == "__main__":
