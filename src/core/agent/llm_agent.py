@@ -4,6 +4,7 @@ from openai import AsyncOpenAI
 import json
 import logging
 from datetime import datetime
+import httpx
 
 from src.core.agent.tools import AVAILABLE_TOOLS
 from src.core.agent.memory import MemoryManager #, Message
@@ -46,12 +47,18 @@ class HallucinationAnalysisAgent:
         data_manager,
         query_optimizer,
         tools,
-        memory_manager: Optional[MemoryManager] = None
+        memory_manager: Optional[MemoryManager] = None,
+        use_realtime: bool = False
     ):
         self.client = AsyncOpenAI(api_key=openai_api_key)
         self.data_manager = data_manager
         self.query_optimizer = query_optimizer
         self.tools = tools
+        self.memory = memory_manager or MemoryManager()
+        self.api_key = openai_api_key
+        self.use_realtime = use_realtime
+        
+        # Store tools as both dict and list for different use cases
         self.available_functions = {
             "get_best_models": tools.get_best_models,
             "compare_hyperparams": tools.compare_hyperparams,
@@ -61,9 +68,121 @@ class HallucinationAnalysisAgent:
             "get_performance_distribution": tools.get_performance_distribution,
             "compare_architectures": tools.compare_architectures,
         }
-        self.memory = memory_manager or MemoryManager()
+        self.tool_descriptions = AVAILABLE_TOOLS
+        
+    async def get_realtime_session(self) -> Dict[str, Any]:
+        """Generate an ephemeral token for WebRTC connection"""
+        async with httpx.AsyncClient() as client:
+            try:
+                # Format tools for realtime API format
+                formatted_tools = []
+                for tool in self.tool_descriptions:
+                    if tool["type"] == "function":
+                        formatted_tool = {
+                            "name": tool["function"]["name"],
+                            "type": "function",
+                            "description": tool["function"]["description"],
+                            "parameters": tool["function"]["parameters"]
+                        }
+                        formatted_tools.append(formatted_tool)
+
+                session_config = {
+                    "model": "gpt-4o-realtime-preview-2024-12-17",
+                    "voice": "alloy",
+                    "tools": formatted_tools,
+                    "temperature": 0.7,
+                    "instructions": SYSTEM_PROMPT
+                }
+                
+                logger.info(f"Sending realtime session request with config: {json.dumps(session_config, indent=2)}")
+                
+                response = await client.post(
+                    "https://api.openai.com/v1/realtime/sessions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json=session_config,
+                    timeout=30.0
+                )
+
+                if response.status_code != 200:
+                    logger.error(f"OpenAI response status: {response.status_code}")
+                    logger.error(f"OpenAI response text: {response.text}")
+                
+                response.raise_for_status()
+                return response.json()
+
+            except Exception as e:
+                logger.error(f"Error generating realtime session: {str(e)}")
+                raise
 
     async def process_query(self, query: str, context: Optional[Dict] = None) -> Dict[str, Any]:
+        """Process a user query using either realtime or standard mode"""
+        if self.use_realtime:
+            # Check if this is a session initialization request
+            is_init = context and context.get('mode') == 'realtime'
+            if is_init:
+                return await self._process_realtime_query(query, context)
+            else:
+                return await self._process_standard_query(query, context)
+        else:
+            return await self._process_standard_query(query, context)
+
+    async def _process_realtime_query(self, query: str, context: Optional[Dict] = None) -> Dict[str, Any]:
+        """Process a query using the realtime API"""
+        try:
+            # Get session details with properly formatted tools
+            session = await self.get_realtime_session()
+            
+            # Store query in memory
+            await self.memory.add_message("user", query)
+
+            # If this is a function execution request from a previous realtime call
+            if context and context.get('function_name'):
+                function_name = context['function_name']
+                arguments = context['arguments']
+                
+                # Execute the function if it exists
+                if function_name in self.available_functions:
+                    try:
+                        result = await self.available_functions[function_name](**arguments)
+                        return {
+                            "response": "Function executed successfully",
+                            "metadata": {
+                                "function_name": function_name,
+                                "success": True
+                            },
+                            "function_result": result
+                        }
+                    except Exception as e:
+                        logger.error(f"Error executing function {function_name}: {e}")
+                        return {
+                            "response": f"Error executing function: {str(e)}",
+                            "metadata": {
+                                "function_name": function_name,
+                                "success": False,
+                                "error": str(e)
+                            }
+                        }
+
+            # Return session info for regular realtime initialization
+            return {
+                "response": "Realtime session initialized",
+                "metadata": {
+                    "session_id": session["id"],
+                    "client_secret": session["client_secret"],
+                    "voice": session["voice"],
+                    "expires_at": session["expires_at"]
+                },
+                "session": session  # Full session details
+            }
+
+        except Exception as e:
+            logger.error(f"Error in realtime processing: {str(e)}")
+            raise
+
+    async def _process_standard_query(self, query: str, context: Optional[Dict] = None) -> Dict[str, Any]:
         """Process a user query using the LLM agent with simplified conversation handling"""
         try:
             # Get conversation history

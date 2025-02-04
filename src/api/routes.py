@@ -3,11 +3,11 @@ import wave
 import io
 from datetime import datetime
 from base64 import b64encode
+import httpx
 
 from fastapi import APIRouter, HTTPException, Depends, Request
 
 from src.services.query_service import (
-    WeaveQueryService,
     QueryRequest,
     QueryResponse
 )
@@ -18,19 +18,37 @@ from src.core.agent.tools import AnalysisTools
 from src.core.agent.memory import MemoryManager
 from src.services.query.optimizer import QueryOptimizer
 from src.core.config import Settings
+from src.api.models import FunctionExecuteRequest
 
 from pydantic import BaseModel
+from typing import Optional, List, Any, Dict
 from functools import lru_cache
+import numpy as np
 
 import logging
+import json
+import math
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-
-##
-#  Dependencies
-##
+def clean_nan_values(data):
+    """Recursively clean NaN values in nested structures"""
+    if isinstance(data, dict):
+        return {k: clean_nan_values(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [clean_nan_values(x) for x in data]
+    elif isinstance(data, (float, np.float64, np.float32)):
+        if math.isnan(data):
+            return "NaN"
+        if math.isinf(data):
+            return "Infinity" if data > 0 else "-Infinity"
+        return float(data)
+    elif isinstance(data, (np.integer, np.floating)):
+        return float(data)
+    elif isinstance(data, np.ndarray):
+        return clean_nan_values(data.tolist())
+    return data
 
 @lru_cache()
 def get_settings():
@@ -71,21 +89,15 @@ async def get_agent(
         data_manager=data_manager,
         query_optimizer=query_optimizer,
         tools=tools,
-        memory_manager=memory_manager
-    )
-
-async def get_query_service():
-    settings = get_settings()
-    return WeaveQueryService(
-        project_name=settings.PROJECT_NAME,
-        openai_api_key=settings.OPENAI_API_KEY
+        memory_manager=memory_manager,
+        use_realtime=True
     )
 
 ##
 #  Routes
 ##
 
-@router.get("/search_memory")
+@router.get("/search_memory") # not used
 async def search_memory(
     query: str,
     limit: int = 5,
@@ -105,22 +117,6 @@ async def search_memory(
             detail="Error searching conversation history"
         )
 
-@router.post("/query", response_model=QueryResponse)
-async def query_weave(
-    request: QueryRequest,
-    service: WeaveQueryService = Depends(get_query_service)
-) -> QueryResponse:
-    """Process a query about the Weave project"""
-    try:
-        return await service.process_query(request)
-    except Exception as e:
-        logger.error(f"Error processing query: {str(e)}")
-        return QueryResponse(
-            answer="I encountered an issue while processing your query...",
-            supporting_data={"error": str(e)},
-            metadata={"status": "error", "error": str(e)}
-        )
-
 @router.post("/query_agent")
 async def process_query(
     request: QueryRequest,
@@ -132,7 +128,7 @@ async def process_query(
         return QueryResponse(
             answer=result["response"],
             metadata=result["metadata"],
-            supporting_data={}
+            supporting_data={"session": result.get("session")}  # Include session for realtime
         )
     except Exception as e:
         logger.error(f"Error processing query: {e}")
@@ -144,15 +140,65 @@ async def process_query(
 
 @router.get("/session")
 async def get_session():
-    response = await httpx.post(
-        "https://api.openai.com/v1/realtime/sessions",
-        headers={
-            "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
-            "Content-Type": "application/json"
-        },
-        json={
-            "model": "gpt-4o-realtime-preview-2024-12-17",
-            "voice": "alloy"  # or your preferred voice
+    """Generate an ephemeral token for WebRTC connection"""
+    settings = get_settings()
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                "https://api.openai.com/v1/realtime/sessions",
+                headers={
+                    "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "gpt-4o-realtime-preview-2024-12-17",
+                    "voice": "alloy"
+                },
+                timeout=30.0
+            )
+            
+            response.raise_for_status()
+            return response.json()  # FastAPI will validate this against SessionResponse
+            
+        except httpx.HTTPError as e:
+            logger.error(f"HTTP Error during session token generation: {str(e)}", exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error generating session token: {str(e)}"
+            )
+        except Exception as e:
+            logger.error(f"Unexpected error during session token generation: {str(e)}", exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Unexpected error: {str(e)}"
+            )
+
+@router.post("/execute_function")
+async def execute_function(
+    request: FunctionExecuteRequest,
+    agent: HallucinationAnalysisAgent = Depends(get_agent)
+):
+    """Execute a specific function using the agent's tools"""
+    try:
+        if request.function_name not in agent.available_functions:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Function {request.function_name} not found"
+            )
+
+        # Execute the function using the agent's tools
+        result = await agent.available_functions[request.function_name](**request.arguments)
+        
+        # Clean the result of NaN values
+        cleaned_result = clean_nan_values(result)
+        
+        # Return the cleaned result
+        return {
+            "status": "success",
+            "data": cleaned_result,
+            "call_id": request.call_id
         }
-    )
-    return response.json()
+    except Exception as e:
+        logger.error(f"Error executing function {request.function_name}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))

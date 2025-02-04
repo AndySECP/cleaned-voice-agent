@@ -505,3 +505,168 @@ AVAILABLE_TOOLS = [
         }
     },
 ]
+
+AVAILABLE_TOOLS_REALTIME = [
+    {
+        "name": "get_best_models",  # Required top-level name
+        "type": "function",
+        "function": {
+            "name": "get_best_models",
+            "description": "Get top performing models for a specific metric",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "metric": {
+                        "type": "string",
+                        "description": "Metric to rank by (e.g., accuracy, f1, precision, recall)"
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Number of top models to return"
+                    }
+                },
+                "required": ["metric"]
+            }
+        }
+    },
+    {
+        "name": "compare_hyperparams",  # Required top-level name
+        "type": "function",
+        "function": {
+            "name": "compare_hyperparams",
+            "description": "Compare performance across different hyperparameter settings",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "metric": {
+                        "type": "string",
+                        "description": "Metric to use for comparison (e.g., accuracy, f1)"
+                    }
+                },
+                "required": ["metric"]
+            }
+        }
+    },
+    {
+        "name": "get_experiment_details",  # Required top-level name
+        "type": "function",
+        "function": {
+            "name": "get_experiment_details",
+            "description": "Get detailed information about a specific experiment",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "description": "ID of the experiment run"
+                    }
+                },
+                "required": ["run_id"]
+            }
+        }
+    },
+    {
+        "name": "analyze_by_model_type",  # Required top-level name
+        "type": "function",
+        "function": {
+            "name": "analyze_by_model_type",
+            "description": "Get performance statistics grouped by model type, including means, distributions, and proportions of experiments",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "metrics": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of metrics to analyze (e.g., ['eval.f1', 'eval.precision']). If not provided, uses default metrics"
+                    },
+                    "group_by": {
+                        "type": "string",
+                        "description": "Column to group by (default: config.model_type)",
+                        "default": "config.model_type"
+                    }
+                }
+            }
+        }
+    },
+    {
+        "name": "analyze_config_impact",  # Required top-level name
+        "type": "function",
+        "function": {
+            "name": "analyze_config_impact",
+            "description": "Analyze how different configuration parameters impact model performance using correlation analysis",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_metric": {
+                        "type": "string",
+                        "description": "Target metric to analyze impact on (e.g., eval.f1)",
+                        "default": "eval.f1"
+                    },
+                    "config_params": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of config parameters to analyze. If not provided, uses all numeric configs"
+                    },
+                    "method": {
+                        "type": "string",
+                        "description": "Analysis method ('correlation' or 'feature_importance')",
+                        "enum": ["correlation", "feature_importance"],
+                        "default": "correlation"
+                    }
+                }
+            }
+        }
+    },
+    {
+        "name": "get_performance_distribution",  # Required top-level name
+        "type": "function",
+        "function": {
+            "name": "get_performance_distribution",
+            "description": "Get statistical distribution of performance metrics including means, standard deviations, and percentiles",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "metrics": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of metrics to analyze. If not provided, uses default metrics"
+                    },
+                    "percentiles": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "description": "List of percentiles to calculate (e.g., [0.1, 0.25, 0.5, 0.75, 0.9])",
+                        "default": [0.1, 0.25, 0.5, 0.75, 0.9]
+                    }
+                }
+            }
+        }
+    },
+    {
+        "name": "compare_architectures",  # Required top-level name
+        "type": "function",
+        "function": {
+            "name": "compare_architectures",
+            "description": "Compare different model architectures with statistical tests and performance metrics",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "metrics": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of metrics to compare. If not provided, uses default metrics"
+                    },
+                    "arch_column": {
+                        "type": "string",
+                        "description": "Column containing architecture information",
+                        "default": "config.architectures"
+                    },
+                    "min_samples": {
+                        "type": "integer",
+                        "description": "Minimum samples required for comparison",
+                        "default": 5
+                    }
+                }
+            }
+        }
+    }
+]
